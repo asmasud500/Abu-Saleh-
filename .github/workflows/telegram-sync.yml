@@ -1,0 +1,50 @@
+name: Sync featured posts
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+permissions:
+  contents: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch new posts
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          test -n "$BOT_TOKEN" || { echo "TELEGRAM_BOT_TOKEN secret is not configured"; exit 1; }
+          python3 - <<'PY'
+          import json, os, urllib.parse, urllib.request
+          token=os.environ['BOT_TOKEN']
+          path='posts.json'
+          try:
+              posts=json.load(open(path))
+          except Exception:
+              posts=[]
+          known={int(x.get('update_id',-1)) for x in posts}
+          offset=max(known)+1 if known else 0
+          url='https://api.telegram.org/bot'+token+'/getUpdates?'+urllib.parse.urlencode({'offset':offset,'timeout':1,'allowed_updates':json.dumps(['message','channel_post'])})
+          with urllib.request.urlopen(url, timeout=10) as r:
+              data=json.load(r)
+          if not data.get('ok'):
+              raise SystemExit(data)
+          for u in data.get('result',[]):
+              item=u.get('channel_post') or u.get('message')
+              if not item or not item.get('text'):
+                  continue
+              text=item['text'].strip()
+              if not text:
+                  continue
+              posts.insert(0, {'update_id':u['update_id'],'date':__import__('datetime').datetime.fromtimestamp(item['date']).strftime('%Y-%m-%d %H:%M'),'title':text.splitlines()[0][:90],'text':'\n'.join(text.splitlines()[1:]).strip() or text,'link':''})
+          posts=posts[:50]
+          json.dump(posts,open(path,'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+          PY
+      - name: Commit changes
+        run: |
+          git config user.name 'telegram-sync[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add posts.json
+          git diff --cached --quiet || git commit -m 'chore: sync featured Telegram posts'
+          git push
